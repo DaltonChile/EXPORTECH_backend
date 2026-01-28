@@ -1,0 +1,12 @@
+# render.yaml - Configuración de despliegue para Render
+services:
+  - type: web
+    name: exportech-backend
+    runtime: python
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn exportech_backend.wsgi:application"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      - key: DEBUG
+        value: "False"
