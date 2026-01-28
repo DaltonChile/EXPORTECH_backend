@@ -2,15 +2,28 @@ from django.contrib import admin
 from .models import (
     Organization, AppUser, ClientPartner, Shipment, SalesItem,
     LabelApproval, ClientInstructions, PackingVersion, BatchItem, 
-    ExportDoc, MagicLink, SignatureLog
+    ExportDoc, MagicLink, SignatureLog, PlatformAdmin
 )
+
+
+@admin.register(PlatformAdmin)
+class PlatformAdminAdmin(admin.ModelAdmin):
+    list_display = ['email', 'name', 'is_active', 'last_login', 'created_at']
+    search_fields = ['email', 'name']
+    list_filter = ['is_active']
+    readonly_fields = ['created_at', 'last_login']
+    
+    def save_model(self, request, obj, form, change):
+        if 'password' in form.changed_data:
+            obj.set_password(form.cleaned_data['password'])
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(Organization)
 class OrganizationAdmin(admin.ModelAdmin):
-    list_display = ['name', 'tax_id', 'plan_type', 'created_at']
+    list_display = ['name', 'tax_id', 'plan_type', 'is_active', 'created_at']
     search_fields = ['name', 'tax_id']
-    list_filter = ['plan_type']
+    list_filter = ['plan_type', 'is_active']
 
 
 @admin.register(AppUser)

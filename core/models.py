@@ -1,5 +1,37 @@
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.contrib.auth.hashers import make_password, check_password as django_check_password
+
+
+# ============================================
+# NIVEL -1: DUEÑOS DE LA PLATAFORMA (SAAS OWNERS)
+# ============================================
+
+class PlatformAdmin(models.Model):
+    """
+    Administradores de la plataforma Exportech.
+    Tabla completamente separada de los usuarios exportadores.
+    Solo pueden acceder al panel de administración de la plataforma.
+    """
+    email = models.EmailField(unique=True)
+    password = models.CharField(max_length=128)
+    name = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_login = models.DateTimeField(null=True, blank=True)
+    
+    def set_password(self, raw_password):
+        self.password = make_password(raw_password)
+    
+    def check_password(self, raw_password):
+        return django_check_password(raw_password, self.password)
+    
+    def __str__(self):
+        return f"[Platform Admin] {self.email}"
+    
+    class Meta:
+        verbose_name = "Platform Admin"
+        verbose_name_plural = "Platform Admins"
 
 
 # ============================================
@@ -16,6 +48,7 @@ class Organization(models.Model):
     name = models.CharField(max_length=255, help_text="Ej: Salmones del Sur S.A.")
     tax_id = models.CharField(max_length=50, unique=True, help_text="RUT: 76.xxx.xxx-k")
     plan_type = models.CharField(max_length=10, choices=PLAN_CHOICES, default='BASIC')
+    is_active = models.BooleanField(default=True, help_text="Organización activa/suspendida")
     created_at = models.DateTimeField(auto_now_add=True)
     
     def __str__(self):

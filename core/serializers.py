@@ -266,3 +266,60 @@ class SignSalesConfirmationSerializer(serializers.Serializer):
                 'rejection_comment': 'Se requiere comentario para rechazar'
             })
         return data
+
+
+# ============================================
+# SERIALIZERS PARA PLATFORM ADMIN (Dueños de la plataforma)
+# ============================================
+
+class PlatformAdminLoginSerializer(serializers.Serializer):
+    """Serializer para login de Platform Admin"""
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+
+class OrganizationPlatformSerializer(serializers.ModelSerializer):
+    """Serializer de Organization para Platform Admin"""
+    users_count = serializers.SerializerMethodField()
+    shipments_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Organization
+        fields = ['id', 'name', 'tax_id', 'plan_type', 'is_active', 'created_at', 'users_count', 'shipments_count']
+        read_only_fields = ['id', 'created_at']
+    
+    def get_users_count(self, obj):
+        return obj.users.count()
+    
+    def get_shipments_count(self, obj):
+        return Shipment.objects.filter(created_by__organization=obj).count()
+
+
+class AppUserPlatformSerializer(serializers.ModelSerializer):
+    """Serializer de AppUser para Platform Admin"""
+    organization_name = serializers.CharField(source='organization.name', read_only=True)
+    password = serializers.CharField(write_only=True, required=False, min_length=6)
+    
+    class Meta:
+        model = AppUser
+        fields = ['id', 'email', 'password', 'role', 'organization', 'organization_name', 'is_active', 'created_at']
+        read_only_fields = ['id', 'created_at']
+    
+    def create(self, validated_data):
+        password = validated_data.pop('password', None)
+        user = AppUser(**validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_password('exportech123')  # Password por defecto
+        user.save()
+        return user
+    
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance

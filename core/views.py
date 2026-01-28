@@ -467,3 +467,251 @@ def sign_sales_confirmation(request, shipment_id, token):
             'rejected_at': signature_log.signed_at.isoformat(),
             'ip_address': client_ip
         })
+
+
+# ============================================
+# PLATFORM ADMIN VIEWS (Dueños de la plataforma)
+# ============================================
+
+from .models import PlatformAdmin, Organization
+from .serializers import (
+    PlatformAdminLoginSerializer,
+    OrganizationPlatformSerializer, 
+    AppUserPlatformSerializer
+)
+import jwt
+from django.conf import settings as django_settings
+from datetime import datetime, timedelta
+
+
+def generate_platform_token(admin):
+    """Genera un JWT para Platform Admin"""
+    payload = {
+        'platform_admin_id': admin.id,
+        'email': admin.email,
+        'type': 'platform_admin',
+        'exp': datetime.utcnow() + timedelta(hours=24),
+        'iat': datetime.utcnow()
+    }
+    return jwt.encode(payload, django_settings.SECRET_KEY, algorithm='HS256')
+
+
+def verify_platform_token(token):
+    """Verifica y decodifica un token de Platform Admin"""
+    try:
+        payload = jwt.decode(token, django_settings.SECRET_KEY, algorithms=['HS256'])
+        if payload.get('type') != 'platform_admin':
+            return None
+        return PlatformAdmin.objects.filter(id=payload['platform_admin_id'], is_active=True).first()
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+
+
+def get_platform_admin_from_request(request):
+    """Extrae el Platform Admin del header Authorization"""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None
+    token = auth_header.split(' ')[1]
+    return verify_platform_token(token)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def platform_login(request):
+    """
+    Login para Platform Admins (dueños de la plataforma)
+    
+    POST /api/platform/login/
+    Body: { "email": "admin@exportech.cl", "password": "secret" }
+    """
+    serializer = PlatformAdminLoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    email = serializer.validated_data['email']
+    password = serializer.validated_data['password']
+    
+    try:
+        admin = PlatformAdmin.objects.get(email=email)
+    except PlatformAdmin.DoesNotExist:
+        return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    if not admin.check_password(password):
+        return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    if not admin.is_active:
+        return Response({'error': 'Cuenta desactivada'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    # Actualizar last_login
+    admin.last_login = timezone.now()
+    admin.save(update_fields=['last_login'])
+    
+    # Generar token
+    token = generate_platform_token(admin)
+    
+    return Response({
+        'token': token,
+        'admin': {
+            'id': admin.id,
+            'email': admin.email,
+            'name': admin.name,
+        }
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def platform_me(request):
+    """
+    Obtener datos del Platform Admin actual
+    
+    GET /api/platform/me/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    return Response({
+        'id': admin.id,
+        'email': admin.email,
+        'name': admin.name,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def platform_stats(request):
+    """
+    Estadísticas de la plataforma para Platform Admin
+    
+    GET /api/platform/stats/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    return Response({
+        'organizations': Organization.objects.count(),
+        'organizations_active': Organization.objects.filter(is_active=True).count(),
+        'users': AppUser.objects.count(),
+        'users_active': AppUser.objects.filter(is_active=True).count(),
+        'shipments': Shipment.objects.count(),
+        'clients': ClientPartner.objects.count(),
+    })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def platform_organizations(request):
+    """
+    Listar o crear organizaciones
+    
+    GET /api/platform/organizations/
+    POST /api/platform/organizations/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    if request.method == 'GET':
+        orgs = Organization.objects.all().order_by('-created_at')
+        serializer = OrganizationPlatformSerializer(orgs, many=True)
+        return Response(serializer.data)
+    
+    elif request.method == 'POST':
+        serializer = OrganizationPlatformSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([AllowAny])
+def platform_organization_detail(request, org_id):
+    """
+    Detalle, actualizar o eliminar organización
+    
+    GET/PUT/DELETE /api/platform/organizations/{id}/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    org = get_object_or_404(Organization, id=org_id)
+    
+    if request.method == 'GET':
+        serializer = OrganizationPlatformSerializer(org)
+        return Response(serializer.data)
+    
+    elif request.method == 'PUT':
+        serializer = OrganizationPlatformSerializer(org, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    elif request.method == 'DELETE':
+        org.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def platform_users(request):
+    """
+    Listar o crear usuarios de organizaciones
+    
+    GET /api/platform/users/?organization=1
+    POST /api/platform/users/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    if request.method == 'GET':
+        users = AppUser.objects.all().order_by('-created_at')
+        org_id = request.query_params.get('organization')
+        if org_id:
+            users = users.filter(organization_id=org_id)
+        serializer = AppUserPlatformSerializer(users, many=True)
+        return Response(serializer.data)
+    
+    elif request.method == 'POST':
+        serializer = AppUserPlatformSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([AllowAny])
+def platform_user_detail(request, user_id):
+    """
+    Detalle, actualizar o eliminar usuario
+    
+    GET/PUT/DELETE /api/platform/users/{id}/
+    """
+    admin = get_platform_admin_from_request(request)
+    if not admin:
+        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    user = get_object_or_404(AppUser, id=user_id)
+    
+    if request.method == 'GET':
+        serializer = AppUserPlatformSerializer(user)
+        return Response(serializer.data)
+    
+    elif request.method == 'PUT':
+        serializer = AppUserPlatformSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    elif request.method == 'DELETE':
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
