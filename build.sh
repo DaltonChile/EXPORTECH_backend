@@ -15,21 +15,27 @@ echo "👤 Verificando Platform Admin..."
 # Crear o actualizar Platform Admin (usando variables de entorno)
 python manage.py shell << EOF
 import os
-from core.models import PlatformAdmin
+from core.models import User
 
 email = os.environ.get('PLATFORM_ADMIN_EMAIL')
 password = os.environ.get('PLATFORM_ADMIN_PASSWORD')
 name = os.environ.get('PLATFORM_ADMIN_NAME', 'Platform Admin')
 
 if email and password:
-    admin, created = PlatformAdmin.objects.get_or_create(
+    user, created = User.objects.get_or_create(
         email=email,
-        defaults={'name': name}
+        defaults={
+            'name': name,
+            'is_platform_admin': True,
+            'is_staff': True,
+            'is_superuser': True,
+        }
     )
     # Siempre actualizar la contraseña y nombre
-    admin.name = name
-    admin.set_password(password)
-    admin.save()
+    user.name = name
+    user.is_platform_admin = True
+    user.set_password(password)
+    user.save()
     
     if created:
         print(f"✅ Platform Admin creado: {email}")
