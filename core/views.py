@@ -43,8 +43,9 @@ from .authentication import platform_admin_required, get_user_organization
 @permission_classes([AllowAny])
 def login(request):
     """
-    Login de usuario normal (no platform admin)
+    Login unificado para todos los usuarios
     POST /api/auth/login/
+    Retorna el tipo de usuario para que el frontend redirija
     """
     email = request.data.get('email')
     password = request.data.get('password')
@@ -57,13 +58,6 @@ def login(request):
     
     try:
         user = User.objects.get(email=email, is_active=True)
-        
-        # No permitir login de platform admins por aquí
-        if user.is_platform_admin:
-            return Response(
-                {'error': 'Use el panel de administración'},
-                status=status.HTTP_403_FORBIDDEN
-            )
         
         if not user.check_password(password):
             return Response(
