@@ -12,7 +12,7 @@ echo "🗄️ Ejecutando migraciones de base de datos..."
 python manage.py migrate --noinput
 
 echo "👤 Verificando Platform Admin..."
-# Crear Platform Admin si no existe (usando variables de entorno)
+# Crear o actualizar Platform Admin (usando variables de entorno)
 python manage.py shell << EOF
 import os
 from core.models import PlatformAdmin
@@ -22,13 +22,19 @@ password = os.environ.get('PLATFORM_ADMIN_PASSWORD')
 name = os.environ.get('PLATFORM_ADMIN_NAME', 'Platform Admin')
 
 if email and password:
-    if not PlatformAdmin.objects.filter(email=email).exists():
-        admin = PlatformAdmin(email=email, name=name)
-        admin.set_password(password)
-        admin.save()
+    admin, created = PlatformAdmin.objects.get_or_create(
+        email=email,
+        defaults={'name': name}
+    )
+    # Siempre actualizar la contraseña y nombre
+    admin.name = name
+    admin.set_password(password)
+    admin.save()
+    
+    if created:
         print(f"✅ Platform Admin creado: {email}")
     else:
-        print(f"ℹ️ Platform Admin ya existe: {email}")
+        print(f"🔄 Platform Admin actualizado: {email}")
 else:
     print("⚠️ Variables PLATFORM_ADMIN_EMAIL y PLATFORM_ADMIN_PASSWORD no configuradas")
 EOF
