@@ -479,7 +479,7 @@ from .serializers import (
     OrganizationPlatformSerializer, 
     AppUserPlatformSerializer
 )
-from .authentication import PlatformAdminAuthentication, IsPlatformAdmin
+from .authentication import PlatformAdminAuthentication, IsPlatformAdmin, platform_admin_required
 import jwt
 from django.conf import settings as django_settings
 from datetime import datetime, timedelta
@@ -574,9 +574,7 @@ def platform_login(request):
     })
 
 
-@api_view(['GET'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET'])
 def platform_me(request):
     """
     Obtener datos del Platform Admin actual
@@ -592,9 +590,7 @@ def platform_me(request):
     })
 
 
-@api_view(['GET'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET'])
 def platform_stats(request):
     """
     Estadísticas de la plataforma para Platform Admin
@@ -611,9 +607,7 @@ def platform_stats(request):
     })
 
 
-@api_view(['GET', 'POST'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET', 'POST'])
 def platform_organizations(request):
     """
     Listar o crear organizaciones
@@ -634,9 +628,7 @@ def platform_organizations(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_organization_detail(request, org_id):
     """
     Detalle, actualizar o eliminar organización
@@ -661,9 +653,7 @@ def platform_organization_detail(request, org_id):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-@api_view(['GET', 'POST'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET', 'POST'])
 def platform_users(request):
     """
     Listar o crear usuarios de organizaciones
@@ -687,9 +677,7 @@ def platform_users(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([PlatformAdminAuthentication])
-@permission_classes([IsPlatformAdmin])
+@platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_user_detail(request, user_id):
     """
     Detalle, actualizar o eliminar usuario

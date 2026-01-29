@@ -1,12 +1,10 @@
 """
-Autenticación personalizada para Platform Admin
+Autenticación y permisos personalizados para Platform Admin
 """
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.permissions import BasePermission
-from rest_framework.exceptions import AuthenticationFailed
 import jwt
 from django.conf import settings
-from .models import PlatformAdmin
 
 
 class PlatformAdminAuthentication(BaseAuthentication):
@@ -15,10 +13,9 @@ class PlatformAdminAuthentication(BaseAuthentication):
     """
     
     def authenticate(self, request):
-        """
-        Intenta autenticar la petición usando el token de Platform Admin
-        Retorna None si no hay token (permite que otros autenticadores lo intenten)
-        """
+        # Import aquí para evitar importación circular
+        from .models import PlatformAdmin
+        
         auth_header = request.headers.get('Authorization', '')
         
         if not auth_header.startswith('Bearer '):
@@ -29,40 +26,56 @@ class PlatformAdminAuthentication(BaseAuthentication):
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             
-            # Verificar que es un token de Platform Admin
             if payload.get('type') != 'platform_admin':
                 return None
             
-            # Obtener el admin
             admin = PlatformAdmin.objects.filter(
                 id=payload['platform_admin_id'],
                 is_active=True
             ).first()
             
             if not admin:
-                raise AuthenticationFailed('Platform Admin no encontrado o inactivo')
+                return None
             
-            # Retornar (user, auth) - usamos admin como "user"
             return (admin, None)
             
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Token expirado')
-        except jwt.InvalidTokenError:
-            raise AuthenticationFailed('Token inválido')
-        except Exception as e:
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            return None
+        except Exception:
             return None
     
     def authenticate_header(self, request):
-        """
-        Retorna el string a usar en el header WWW-Authenticate
-        """
         return 'Bearer realm="api"'
 
 
 class IsPlatformAdmin(BasePermission):
     """
-    Permiso personalizado que verifica si el usuario es un PlatformAdmin
+    Permiso que verifica si el usuario es un PlatformAdmin
     """
-    
     def has_permission(self, request, view):
+        # Import aquí para evitar importación circular
+        from .models import PlatformAdmin
         return isinstance(request.user, PlatformAdmin)
+
+
+def platform_admin_required(methods=['GET']):
+    """
+    Decorador que combina api_view + autenticación + permisos de Platform Admin
+    
+    Uso:
+        @platform_admin_required(['GET', 'POST'])
+        def my_view(request):
+            ...
+    """
+    from functools import wraps
+    from rest_framework.decorators import api_view, authentication_classes, permission_classes
+    
+    def decorator(view_func):
+        @api_view(methods)
+        @authentication_classes([PlatformAdminAuthentication])
+        @permission_classes([IsPlatformAdmin])
+        @wraps(view_func)
+        def wrapped_view(request, *args, **kwargs):
+            return view_func(request, *args, **kwargs)
+        return wrapped_view
+    return decorator
