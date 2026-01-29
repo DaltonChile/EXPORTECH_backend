@@ -10,6 +10,8 @@ from django.core.mail import send_mail
 from django.conf import settings
 from datetime import timedelta
 import secrets
+import threading
+import os
 
 from .models import AppUser, ClientPartner, Shipment, SalesItem, MagicLink, SignatureLog
 from .serializers import (
@@ -273,12 +275,11 @@ class ShipmentViewSet(viewsets.ModelViewSet):
             expires_at=timezone.now() + timedelta(days=7)
         )
         
-        # Construir la URL del magic link (para el frontend en desarrollo)
-        # En producción, cambiar a la URL real del frontend
-        frontend_url = 'http://localhost:5173'
+        # Construir la URL del magic link
+        frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
         magic_url = f"{frontend_url}/sign/{shipment.id}/{magic_token}"
         
-        # Enviar email al cliente
+        # Enviar email al cliente EN BACKGROUND (no bloquea el request)
         html_message = f'''
         <!DOCTYPE html>
         <html>
@@ -313,18 +314,28 @@ class ShipmentViewSet(viewsets.ModelViewSet):
         </html>
         '''
         
-        send_mail(
-            subject=f'Action Required: Sign Sales Confirmation #{shipment.internal_ref}',
-            message=f'Please review and sign the Sales Confirmation at: {magic_url}',
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[client_email],
-            html_message=html_message,
-            fail_silently=False,
-        )
+        # Función para enviar email en background
+        def send_email_async():
+            try:
+                send_mail(
+                    subject=f'Action Required: Sign Sales Confirmation #{shipment.internal_ref}',
+                    message=f'Please review and sign the Sales Confirmation at: {magic_url}',
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[client_email],
+                    html_message=html_message,
+                    fail_silently=False,
+                )
+                print(f"✅ Email enviado a {client_email}")
+            except Exception as e:
+                print(f"❌ Error enviando email: {e}")
+        
+        # Iniciar envío en thread separado
+        email_thread = threading.Thread(target=send_email_async)
+        email_thread.start()
         
         return Response({
-            'message': f'Sales Confirmation enviado a {client_email}',
-            'magic_link': magic_url,  # Solo para desarrollo
+            'message': f'Sales Confirmation enviándose a {client_email}',
+            'magic_link': magic_url,
             'shipment_ref': shipment.internal_ref,
             'expires_at': magic_link.expires_at.isoformat()
         })
