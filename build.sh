@@ -8,31 +8,6 @@ pip install -r requirements.txt
 echo "📁 Recolectando archivos estáticos..."
 python manage.py collectstatic --no-input
 
-echo "🗄️ Verificando estado de base de datos..."
-# Resetear migraciones si las tablas están desincronizadas
-python manage.py shell << 'RESET_CHECK'
-from django.db import connection
-from django.core.management import call_command
-
-try:
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT 1 FROM core_user LIMIT 1")
-    print("✅ Tablas existen, no es necesario resetear")
-except Exception as e:
-    print(f"⚠️ Tablas no existen o están corruptas: {e}")
-    print("🔄 Reseteando base de datos completa...")
-    try:
-        with connection.cursor() as cursor:
-            # Eliminar TODO el schema y recrearlo
-            cursor.execute("DROP SCHEMA public CASCADE")
-            cursor.execute("CREATE SCHEMA public")
-            cursor.execute("GRANT ALL ON SCHEMA public TO postgres")
-            cursor.execute("GRANT ALL ON SCHEMA public TO public")
-        print("✅ Schema reseteado, las migraciones se aplicarán desde cero")
-    except Exception as drop_error:
-        print(f"Error al resetear schema: {drop_error}")
-RESET_CHECK
-
 echo "🗄️ Ejecutando migraciones de base de datos..."
 python manage.py migrate --noinput
 
