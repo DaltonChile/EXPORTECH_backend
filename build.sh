@@ -20,33 +20,17 @@ try:
     print("✅ Tablas existen, no es necesario resetear")
 except Exception as e:
     print(f"⚠️ Tablas no existen o están corruptas: {e}")
-    print("🔄 Reseteando migraciones...")
-    # Limpiar tabla de migraciones para que Django las aplique de nuevo
+    print("🔄 Reseteando base de datos completa...")
     try:
         with connection.cursor() as cursor:
-            cursor.execute("DROP TABLE IF EXISTS django_migrations CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS django_content_type CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS django_admin_log CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS django_session CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS auth_permission CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS auth_group CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS auth_group_permissions CASCADE")
-            # Eliminar todas las tablas de core
-            cursor.execute("DROP TABLE IF EXISTS core_salesitem CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_shipmentsignature CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_shipmentparticipant CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_shipment CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_businessrelation CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_material CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_user CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_organization CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_systemconfig CASCADE")
-            # Tablas viejas que pueden existir
-            cursor.execute("DROP TABLE IF EXISTS core_clientpartner CASCADE")
-            cursor.execute("DROP TABLE IF EXISTS core_platformadmin CASCADE")
-        print("✅ Tablas eliminadas, las migraciones se aplicarán desde cero")
+            # Eliminar TODO el schema y recrearlo
+            cursor.execute("DROP SCHEMA public CASCADE")
+            cursor.execute("CREATE SCHEMA public")
+            cursor.execute("GRANT ALL ON SCHEMA public TO postgres")
+            cursor.execute("GRANT ALL ON SCHEMA public TO public")
+        print("✅ Schema reseteado, las migraciones se aplicarán desde cero")
     except Exception as drop_error:
-        print(f"Error al eliminar tablas: {drop_error}")
+        print(f"Error al resetear schema: {drop_error}")
 RESET_CHECK
 
 echo "🗄️ Ejecutando migraciones de base de datos..."
