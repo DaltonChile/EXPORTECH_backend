@@ -17,6 +17,10 @@ urlpatterns = [
     path('auth/login/', views.login, name='login'),
     path('auth/me/', views.me, name='me'),
     
+    # Claim Account (Shadow Org → Active)
+    path('auth/claim/verify/<str:token>/', views.verify_claim_token, name='verify-claim'),
+    path('auth/claim/<str:token>/', views.claim_account, name='claim-account'),
+    
     # ============================================
     # RESOURCES
     # ============================================

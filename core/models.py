@@ -59,6 +59,16 @@ class Organization(models.Model):
     contact_email = models.EmailField(blank=True, help_text="Email principal de la organización")
     created_at = models.DateTimeField(auto_now_add=True)
     
+    # Campo para Shadow Organizations - quién la creó
+    created_by_org = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_shadow_orgs',
+        help_text="Organización que creó esta shadow org (solo para UNCLAIMED)"
+    )
+    
     def __str__(self):
         return f"{self.name} ({self.type})"
     
@@ -194,6 +204,9 @@ class Shipment(models.Model):
     destination_port = models.CharField(max_length=255, blank=True)
     payment_terms = models.CharField(max_length=255, blank=True)
     currency = models.CharField(max_length=3, default='USD')
+    
+    # Email de destino para documentos (puede ser diferente al contact_email del buyer)
+    buyer_email = models.EmailField(blank=True, help_text="Email donde enviar documentos")
     
     # Logística
     booking_ref = models.CharField(max_length=100, blank=True)

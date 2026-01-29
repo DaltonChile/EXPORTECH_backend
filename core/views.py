@@ -92,6 +92,127 @@ def me(request):
 
 
 # ============================================
+# CLAIM ACCOUNT (Shadow Organization → Active)
+# ============================================
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def verify_claim_token(request, token):
+    """
+    Verificar si un token de claim es válido
+    GET /api/auth/claim/verify/<token>/
+    
+    Retorna los datos básicos de la organización para mostrar en el formulario
+    """
+    try:
+        # Decodificar token JWT
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+        user_id = payload.get('user_id')
+        
+        user = User.objects.select_related('organization').get(
+            id=user_id,
+            invite_pending=True,
+            is_active=True
+        )
+        
+        return Response({
+            'valid': True,
+            'email': user.email,
+            'organization_name': user.organization.name if user.organization else None,
+            'organization_id': str(user.organization.id) if user.organization else None,
+        })
+        
+    except jwt.ExpiredSignatureError:
+        return Response({'valid': False, 'error': 'El enlace ha expirado'}, status=400)
+    except jwt.InvalidTokenError:
+        return Response({'valid': False, 'error': 'Enlace inválido'}, status=400)
+    except User.DoesNotExist:
+        return Response({'valid': False, 'error': 'Cuenta ya reclamada o no existe'}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def claim_account(request, token):
+    """
+    Reclamar cuenta de importador (Shadow Org → Active)
+    POST /api/auth/claim/<token>/
+    
+    Body: { "password": "...", "name": "..." }
+    
+    Flujo:
+    1. Valida el token JWT
+    2. Establece password del usuario
+    3. Cambia invite_pending → False
+    4. Cambia Organization status UNCLAIMED → ACTIVE
+    5. Retorna tokens JWT para auto-login
+    """
+    password = request.data.get('password')
+    name = request.data.get('name', '').strip()
+    
+    if not password or len(password) < 6:
+        return Response(
+            {'error': 'Password debe tener al menos 6 caracteres'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # Decodificar token JWT
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+        user_id = payload.get('user_id')
+        
+        user = User.objects.select_related('organization').get(
+            id=user_id,
+            invite_pending=True,
+            is_active=True
+        )
+        
+        # Establecer password y activar cuenta
+        user.set_password(password)
+        if name:
+            user.name = name
+        user.invite_pending = False
+        user.save()
+        
+        # Activar la organización si estaba UNCLAIMED
+        org = user.organization
+        if org and org.status == 'UNCLAIMED':
+            org.status = 'ACTIVE'
+            org.save()
+        
+        # Generar tokens JWT para auto-login
+        refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            'success': True,
+            'message': 'Cuenta activada exitosamente',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserSerializer(user).data
+        })
+        
+    except jwt.ExpiredSignatureError:
+        return Response({'error': 'El enlace ha expirado'}, status=400)
+    except jwt.InvalidTokenError:
+        return Response({'error': 'Enlace inválido'}, status=400)
+    except User.DoesNotExist:
+        return Response({'error': 'Cuenta ya reclamada o no existe'}, status=400)
+
+
+def generate_claim_token(user, expires_days=7):
+    """
+    Genera un token JWT para reclamar cuenta
+    Útil para enviar en emails de invitación
+    """
+    payload = {
+        'user_id': str(user.id),
+        'email': user.email,
+        'exp': datetime.utcnow() + timedelta(days=expires_days),
+        'type': 'claim'
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+
+
+# ============================================
 # CLIENTS (BUSINESS RELATIONS / AGENDA)
 # ============================================
 
@@ -119,17 +240,34 @@ class ClientViewSet(viewsets.ViewSet):
         return Response(serializer.data)
     
     def create(self, request):
-        """Crear nuevo cliente (Shadow Organization con status UNCLAIMED)"""
+        """
+        Crear nuevo cliente (Shadow Organization)
+        
+        Flujo:
+        - Si org ya existe: solo crea vínculo BusinessRelation
+        - Si no existe: crea Shadow Org + User fantasma + BusinessRelation
+        """
         serializer = CreatePartnerOrganizationSerializer(
             data=request.data,
             context={'request': request}
         )
         if serializer.is_valid():
             partner_org = serializer.save()
+            
+            # Determinar si era existente o nueva
+            was_existing = getattr(partner_org, '_was_existing', False)
+            
+            if was_existing:
+                message = f'"{partner_org.name}" ya existía en la plataforma. Se agregó a tu agenda.'
+            else:
+                message = 'Cliente creado exitosamente'
+            
             return Response({
                 'id': str(partner_org.id),
                 'name': partner_org.name,
-                'message': 'Cliente creado exitosamente'
+                'status': partner_org.status,
+                'was_existing': was_existing,
+                'message': message
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
@@ -150,6 +288,60 @@ class ClientViewSet(viewsets.ViewSet):
             'alias': relation.alias,
             'notes': relation.notes,
         })
+    
+    @action(detail=True, methods=['get'], url_path='emails')
+    def get_emails(self, request, pk=None):
+        """
+        Obtener emails de contacto que YO (exportador) he usado con este cliente
+        GET /api/clients/{org_id}/emails/
+        
+        PRIVACIDAD: Solo devuelve emails de MIS embarques con este cliente.
+        Otros exportadores no ven los contactos que yo agregué.
+        
+        Fuente: Shipment.buyer_email de embarques donde yo soy el exportador
+        y el cliente es el importador.
+        """
+        org = get_user_organization(request.user)
+        if not org:
+            return Response({'error': 'Usuario sin organización'}, status=400)
+        
+        # Verificar que el cliente está en mi agenda
+        relation = get_object_or_404(
+            BusinessRelation,
+            host_org=org,
+            partner_org_id=pk
+        )
+        
+        partner_org = relation.partner_org
+        
+        # Obtener emails únicos de MIS embarques con este cliente
+        # Esto garantiza privacidad: solo veo los contactos que YO he usado
+        from django.db.models import Q
+        
+        my_shipments = Shipment.objects.filter(
+            participants__organization=org,
+            participants__role_type='EXPORTER',
+            participants__organization_id__in=Shipment.objects.filter(
+                participants__organization=partner_org,
+                participants__role_type='IMPORTER'
+            ).values('id')
+        ).filter(
+            buyer_email__isnull=False
+        ).exclude(
+            buyer_email=''
+        ).values_list('buyer_email', flat=True).distinct()
+        
+        # Buscar datos del usuario para cada email
+        emails = []
+        for email in my_shipments:
+            user = User.objects.filter(email__iexact=email).first()
+            emails.append({
+                'email': email,
+                'name': user.name if user else email.split('@')[0],
+                'is_pending': user.invite_pending if user else True
+            })
+        
+        return Response(emails)
 
 
 # ============================================
@@ -232,7 +424,7 @@ class ShipmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Obtener email del buyer
+        # Obtener email del buyer (preferir shipment.buyer_email)
         buyer = shipment.participants.filter(role_type='BUYER').first()
         if not buyer:
             return Response(
@@ -240,12 +432,31 @@ class ShipmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        client_email = buyer.organization.contact_email
+        client_email = shipment.buyer_email or buyer.organization.contact_email
         if not client_email:
             return Response(
                 {'error': 'El cliente no tiene email configurado'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
+        # =============================================
+        # CREAR USUARIO FANTASMA SI NO EXISTE
+        # Esto permite el claim cuando abran el magic link
+        # =============================================
+        buyer_org = buyer.organization
+        existing_user = User.objects.filter(email__iexact=client_email).first()
+        
+        if not existing_user:
+            # Crear usuario fantasma para este email
+            User.objects.create(
+                email=client_email,
+                name=buyer_org.name,
+                organization=buyer_org,
+                role='OPERATOR',  # Los adicionales son operadores, no admin
+                invite_pending=True,
+                is_active=True
+            )
+            print(f"👤 Usuario fantasma creado: {client_email}")
         
         # Invalidar magic links anteriores
         MagicLink.objects.filter(shipment=shipment, is_active=True).update(is_active=False)
@@ -393,6 +604,9 @@ def view_sales_confirmation(request, shipment_id, token):
     """
     Vista pública del Sales Confirmation via magic link
     GET /api/sign/{shipment_id}/{token}/
+    
+    Si la organización compradora es UNCLAIMED, retorna claim_required=True
+    para que el frontend fuerce el claim antes de permitir firmar.
     """
     magic_link = get_object_or_404(MagicLink, shipment_id=shipment_id, token=token)
     
@@ -405,11 +619,35 @@ def view_sales_confirmation(request, shipment_id, token):
     shipment = magic_link.shipment
     serializer = SalesConfirmationSerializer(shipment)
     
-    return Response({
+    response_data = {
         'shipment': serializer.data,
         'can_sign': shipment.status in ['DRAFT', 'SC_SENT'],
         'expires_at': magic_link.expires_at.isoformat()
-    })
+    }
+    
+    # Verificar si el BUYER es UNCLAIMED (primera vez)
+    buyer = shipment.participants.filter(role_type='BUYER').first()
+    if buyer and buyer.organization and buyer.organization.status == 'UNCLAIMED':
+        # Buscar usuario fantasma para generar claim token
+        pending_user = User.objects.filter(
+            organization=buyer.organization,
+            invite_pending=True
+        ).first()
+        
+        if pending_user:
+            response_data['claim_required'] = True
+            response_data['claim_token'] = generate_claim_token(pending_user, expires_days=30)
+            response_data['claim_email'] = pending_user.email
+            response_data['claim_org_name'] = buyer.organization.name
+            response_data['claim_message'] = f'Para firmar este documento, primero debes activar tu cuenta de {buyer.organization.name}'
+        else:
+            # Org UNCLAIMED pero sin usuario fantasma (caso legacy)
+            response_data['claim_required'] = True
+            response_data['claim_error'] = 'No hay usuario asociado. Contacta al exportador.'
+    else:
+        response_data['claim_required'] = False
+    
+    return Response(response_data)
 
 
 @api_view(['POST'])
@@ -418,6 +656,9 @@ def sign_sales_confirmation(request, shipment_id, token):
     """
     Firmar o rechazar Sales Confirmation
     POST /api/sign/{shipment_id}/{token}/submit/
+    
+    Bloquea la firma si la organización compradora es UNCLAIMED.
+    El importador debe hacer claim primero.
     """
     magic_link = get_object_or_404(MagicLink, shipment_id=shipment_id, token=token)
     
@@ -428,6 +669,14 @@ def sign_sales_confirmation(request, shipment_id, token):
         )
     
     shipment = magic_link.shipment
+    
+    # Verificar que el BUYER no sea UNCLAIMED
+    buyer = shipment.participants.filter(role_type='BUYER').first()
+    if buyer and buyer.organization and buyer.organization.status == 'UNCLAIMED':
+        return Response(
+            {'error': 'Debes activar tu cuenta antes de firmar. Recarga la página para ver las instrucciones.'},
+            status=status.HTTP_403_FORBIDDEN
+        )
     
     if shipment.status not in ['DRAFT', 'SC_SENT']:
         return Response(
@@ -461,11 +710,34 @@ def sign_sales_confirmation(request, shipment_id, token):
         shipment.status = 'SIGNED'
         shipment.save()
         
-        return Response({
+        # Verificar si el comprador puede reclamar cuenta
+        claim_token = None
+        claim_email = None
+        buyer = shipment.participants.filter(role_type='BUYER').first()
+        if buyer and buyer.organization:
+            # Buscar usuario fantasma asociado a esta organización
+            pending_user = User.objects.filter(
+                organization=buyer.organization,
+                invite_pending=True
+            ).first()
+            if pending_user:
+                claim_token = generate_claim_token(pending_user, expires_days=30)
+                claim_email = pending_user.email
+        
+        response_data = {
             'message': 'Sales Confirmation firmado exitosamente',
             'status': 'SIGNED',
             'signed_by': data['signature_name'],
-        })
+        }
+        
+        # Incluir opción de claim si aplica
+        if claim_token:
+            response_data['claim_available'] = True
+            response_data['claim_token'] = claim_token
+            response_data['claim_email'] = claim_email
+            response_data['claim_message'] = '¿Deseas crear una cuenta para acceder a tus documentos en el futuro?'
+        
+        return Response(response_data)
     
     else:  # reject
         SignatureLog.objects.create(

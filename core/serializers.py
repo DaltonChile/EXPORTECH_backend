@@ -46,29 +46,78 @@ class OrganizationMinimalSerializer(serializers.ModelSerializer):
 class CreatePartnerOrganizationSerializer(serializers.Serializer):
     """
     Crear una organización partner (cliente/proveedor)
-    Crea la Organization con status UNCLAIMED y el BusinessRelation
+    
+    Flujo Shadow Organization:
+    1. Busca si ya existe por tax_id o usuario con ese email
+    2. Si existe: solo crea BusinessRelation (vínculo)
+    3. Si no existe: crea Organization UNCLAIMED + User fantasma + BusinessRelation
+    
+    Los contactos (emails) se agregan al crear embarques, no aquí.
     """
     name = serializers.CharField(max_length=255)
     country = serializers.CharField(max_length=100)
     tax_id = serializers.CharField(max_length=50, required=False, allow_blank=True)
-    contact_email = serializers.EmailField(required=False, allow_blank=True)
     default_address = serializers.CharField(required=False, allow_blank=True)
     alias = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    
+    def validate(self, attrs):
+        """Verificar si ya existe relación comercial"""
+        host_org = self.context['request'].user.organization
+        tax_id = attrs.get('tax_id', '').strip()
+        
+        # Buscar organización existente por tax_id
+        existing_org = None
+        
+        if tax_id:
+            existing_org = Organization.objects.filter(
+                tax_id__iexact=tax_id,
+                type='IMPORTER'
+            ).first()
+        
+        # Si existe, verificar que no tengamos ya la relación
+        if existing_org:
+            relation_exists = BusinessRelation.objects.filter(
+                host_org=host_org,
+                partner_org=existing_org
+            ).exists()
+            
+            if relation_exists:
+                raise serializers.ValidationError({
+                    'tax_id': f'Ya tienes a "{existing_org.name}" en tu agenda de clientes.'
+                })
+            
+            # Marcar para solo crear el vínculo
+            attrs['_existing_org'] = existing_org
+        
+        return attrs
     
     def create(self, validated_data):
         host_org = self.context['request'].user.organization
         alias = validated_data.pop('alias', '')
+        existing_org = validated_data.pop('_existing_org', None)
         
-        # Crear organización con status UNCLAIMED
-        partner_org = Organization.objects.create(
-            name=validated_data['name'],
-            country=validated_data['country'],
-            tax_id=validated_data.get('tax_id', ''),
-            contact_email=validated_data.get('contact_email', ''),
-            default_address=validated_data.get('default_address', ''),
-            type='IMPORTER',
-            status='UNCLAIMED'
-        )
+        if existing_org:
+            # ========================================
+            # CASO A: Organización ya existe en plataforma
+            # Solo crear el vínculo (BusinessRelation)
+            # ========================================
+            partner_org = existing_org
+            partner_org._was_existing = True  # Flag para respuesta
+        else:
+            # ========================================
+            # CASO B: Nueva Shadow Organization
+            # Los contactos se agregan al crear embarques
+            # ========================================
+            partner_org = Organization.objects.create(
+                name=validated_data['name'],
+                country=validated_data['country'],
+                tax_id=validated_data.get('tax_id', ''),
+                default_address=validated_data.get('default_address', ''),
+                type='IMPORTER',
+                status='UNCLAIMED',
+                created_by_org=host_org
+            )
+            partner_org._was_existing = False
         
         # Crear relación comercial
         BusinessRelation.objects.create(
@@ -135,13 +184,13 @@ class ClientListSerializer(serializers.ModelSerializer):
     organization_id = serializers.UUIDField(source='partner_org.id')
     name = serializers.CharField(source='partner_org.name')
     country = serializers.CharField(source='partner_org.country')
-    contact_email = serializers.EmailField(source='partner_org.contact_email')
     status = serializers.CharField(source='partner_org.status')
+    tax_id = serializers.CharField(source='partner_org.tax_id', allow_blank=True)
     alias = serializers.CharField()
     
     class Meta:
         model = BusinessRelation
-        fields = ['organization_id', 'name', 'country', 'contact_email', 'status', 'alias']
+        fields = ['organization_id', 'name', 'country', 'status', 'tax_id', 'alias']
 
 
 # ============================================
@@ -268,6 +317,7 @@ class ShipmentCreateSerializer(serializers.Serializer):
     Crea el Shipment + ShipmentParticipant (BUYER) + SalesItems
     """
     buyer_org_id = serializers.UUIDField()
+    buyer_email = serializers.EmailField(help_text="Email donde enviar documentos")
     incoterm = serializers.CharField(max_length=10)
     destination_port = serializers.CharField(max_length=255, required=False, allow_blank=True)
     payment_terms = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -301,6 +351,7 @@ class ShipmentCreateSerializer(serializers.Serializer):
         owner_org = user.organization
         sales_items_data = validated_data.pop('sales_items')
         buyer_org_id = validated_data.pop('buyer_org_id')
+        buyer_email = validated_data.pop('buyer_email')
         
         # Generar referencia interna
         last_shipment = Shipment.objects.filter(owner_org=owner_org).order_by('-id').first()
@@ -312,6 +363,7 @@ class ShipmentCreateSerializer(serializers.Serializer):
             owner_org=owner_org,
             internal_ref=internal_ref,
             created_by=user,
+            buyer_email=buyer_email,
             **validated_data
         )
         
