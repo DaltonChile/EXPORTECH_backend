@@ -1,223 +1,204 @@
-from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes, action, authentication_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import authenticate
+"""
+Views - Arquitectura Multi-Tenant
+"""
+import os
+import secrets
+import threading
+import jwt
+from datetime import datetime, timedelta
+
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.mail import send_mail
-from django.conf import settings
-from datetime import timedelta
-import secrets
-import threading
-import os
 
-from .models import AppUser, ClientPartner, Shipment, SalesItem, MagicLink, SignatureLog
-from .serializers import (
-    ClientPartnerSerializer,
-    ShipmentListSerializer, ShipmentDetailSerializer, ShipmentCreateSerializer,
-    SalesConfirmationSerializer, SignSalesConfirmationSerializer,
-    SalesItemSerializer, SalesItemCreateSerializer,
-    MATERIAL_MASTER
+from rest_framework import viewsets, status
+from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from .models import (
+    SystemConfig, Organization, User, BusinessRelation,
+    Shipment, ShipmentParticipant, SalesItem, MagicLink, SignatureLog
 )
+from .serializers import (
+    SystemConfigSerializer,
+    OrganizationSerializer, OrganizationMinimalSerializer, CreatePartnerOrganizationSerializer,
+    UserSerializer,
+    BusinessRelationSerializer, ClientListSerializer,
+    ShipmentListSerializer, ShipmentDetailSerializer, ShipmentCreateSerializer,
+    SalesItemSerializer, SalesConfirmationSerializer, SignSalesConfirmationSerializer,
+    PlatformLoginSerializer, OrganizationPlatformSerializer, UserPlatformSerializer,
+    MATERIAL_MASTER, MaterialMasterSerializer
+)
+from .authentication import platform_admin_required, get_user_organization
 
+
+# ============================================
+# AUTH ENDPOINTS
+# ============================================
 
 @api_view(['POST'])
-@permission_classes([AllowAny])  # Permite acceso sin autenticación
-def login_view(request):
+@permission_classes([AllowAny])
+def login(request):
     """
-    Vista de Login - Recibe email y password, retorna tokens JWT
-    
+    Login de usuario normal (no platform admin)
     POST /api/auth/login/
-    Body: { "email": "user@example.com", "password": "secret" }
-    
-    Respuesta exitosa:
-    {
-        "access": "eyJ0eXAiOiJKV1...",   # Token de acceso (8 horas)
-        "refresh": "eyJ0eXAiOiJKV1...",  # Token de refresh (7 días)
-        "user": {
-            "id": 1,
-            "email": "user@example.com",
-            "role": "OPERADOR",
-            "organization": "Salmones del Sur S.A."
-        }
-    }
     """
     email = request.data.get('email')
     password = request.data.get('password')
     
-    # Validar que se enviaron los campos
     if not email or not password:
         return Response(
-            {'error': 'Email y contraseña son requeridos'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Autenticar usuario
-    user = authenticate(request, username=email, password=password)
-    
-    if user is None:
-        return Response(
-            {'error': 'Credenciales inválidas'},
-            status=status.HTTP_401_UNAUTHORIZED
-        )
-    
-    if not user.is_active:
-        return Response(
-            {'error': 'Usuario desactivado'},
-            status=status.HTTP_401_UNAUTHORIZED
-        )
-    
-    # Generar tokens JWT
-    refresh = RefreshToken.for_user(user)
-    
-    # Preparar datos del usuario para el frontend
-    user_data = {
-        'id': user.id,
-        'email': user.email,
-        'role': user.role,
-        'organization': user.organization.name if user.organization else None,
-    }
-    
-    return Response({
-        'access': str(refresh.access_token),
-        'refresh': str(refresh),
-        'user': user_data
-    })
-
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def refresh_token_view(request):
-    """
-    Renueva el token de acceso usando el refresh token
-    
-    POST /api/auth/refresh/
-    Body: { "refresh": "eyJ0eXAiOiJKV1..." }
-    """
-    refresh_token = request.data.get('refresh')
-    
-    if not refresh_token:
-        return Response(
-            {'error': 'Refresh token requerido'},
+            {'error': 'Email y password requeridos'},
             status=status.HTTP_400_BAD_REQUEST
         )
     
     try:
-        refresh = RefreshToken(refresh_token)
+        user = User.objects.get(email=email, is_active=True)
+        
+        # No permitir login de platform admins por aquí
+        if user.is_platform_admin:
+            return Response(
+                {'error': 'Use el panel de administración'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if not user.check_password(password):
+            return Response(
+                {'error': 'Credenciales inválidas'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Generar tokens JWT
+        refresh = RefreshToken.for_user(user)
+        
         return Response({
             'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserSerializer(user).data
         })
-    except Exception:
+        
+    except User.DoesNotExist:
         return Response(
-            {'error': 'Refresh token inválido o expirado'},
+            {'error': 'Credenciales inválidas'},
             status=status.HTTP_401_UNAUTHORIZED
         )
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])  # Requiere autenticación
-def me_view(request):
+@permission_classes([IsAuthenticated])
+def me(request):
     """
-    Retorna información del usuario autenticado
-    Útil para verificar el token y obtener datos del usuario
-    
+    Obtener datos del usuario actual
     GET /api/auth/me/
-    Headers: Authorization: Bearer <access_token>
     """
-    user = request.user
-    
-    return Response({
-        'id': user.id,
-        'email': user.email,
-        'role': user.role,
-        'organization': user.organization.name if user.organization else None,
-    })
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def logout_view(request):
-    """
-    Logout - Invalida el refresh token
-    
-    POST /api/auth/logout/
-    Body: { "refresh": "eyJ0eXAiOiJKV1..." }
-    """
-    refresh_token = request.data.get('refresh')
-    
-    if refresh_token:
-        try:
-            token = RefreshToken(refresh_token)
-            token.blacklist()  # Invalida el token
-        except Exception:
-            pass  # Si falla, no importa
-    
-    return Response({'message': 'Logout exitoso'})
+    return Response(UserSerializer(request.user).data)
 
 
 # ============================================
-# FASE 1: ACUERDO COMERCIAL
+# CLIENTS (BUSINESS RELATIONS / AGENDA)
 # ============================================
 
-# --- Maestro de Materiales ---
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def material_master_list(request):
+class ClientViewSet(viewsets.ViewSet):
     """
-    Lista el Maestro de Materiales (productos disponibles)
+    Gestión de clientes (partners en la agenda)
     
-    GET /api/materials/
-    
-    Retorna lista de SKUs con descripción para evitar errores de tipeo
+    GET    /api/clients/          - Lista clientes de mi agenda
+    POST   /api/clients/          - Crear cliente (Shadow Organization)
+    GET    /api/clients/{id}/     - Detalle de cliente
     """
-    return Response(MATERIAL_MASTER)
-
-
-# --- Clientes ---
-class ClientViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet para gestionar clientes/importadores
-    
-    GET    /api/clients/         - Lista clientes
-    POST   /api/clients/         - Crear cliente
-    GET    /api/clients/{id}/    - Detalle cliente
-    PUT    /api/clients/{id}/    - Actualizar cliente
-    DELETE /api/clients/{id}/    - Eliminar cliente
-    """
-    serializer_class = ClientPartnerSerializer
     permission_classes = [IsAuthenticated]
     
-    def get_queryset(self):
-        """Filtrar por organización del usuario"""
-        return ClientPartner.objects.filter(
-            organization=self.request.user.organization
-        ).order_by('-created_at')
+    def list(self, request):
+        """Listar clientes de la agenda del usuario"""
+        org = get_user_organization(request.user)
+        if not org:
+            return Response({'error': 'Usuario sin organización'}, status=400)
+        
+        relations = BusinessRelation.objects.filter(
+            host_org=org
+        ).select_related('partner_org').order_by('-created_at')
+        
+        serializer = ClientListSerializer(relations, many=True)
+        return Response(serializer.data)
+    
+    def create(self, request):
+        """Crear nuevo cliente (Shadow Organization con status UNCLAIMED)"""
+        serializer = CreatePartnerOrganizationSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        if serializer.is_valid():
+            partner_org = serializer.save()
+            return Response({
+                'id': str(partner_org.id),
+                'name': partner_org.name,
+                'message': 'Cliente creado exitosamente'
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def retrieve(self, request, pk=None):
+        """Detalle de un cliente"""
+        org = get_user_organization(request.user)
+        if not org:
+            return Response({'error': 'Usuario sin organización'}, status=400)
+        
+        relation = get_object_or_404(
+            BusinessRelation,
+            host_org=org,
+            partner_org_id=pk
+        )
+        
+        return Response({
+            'organization': OrganizationSerializer(relation.partner_org).data,
+            'alias': relation.alias,
+            'notes': relation.notes,
+        })
 
 
-# --- Embarques ---
+# ============================================
+# SHIPMENTS
+# ============================================
+
 class ShipmentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet para gestionar embarques
+    Gestión de embarques
     
-    GET    /api/shipments/              - Lista embarques
-    POST   /api/shipments/              - Crear embarque (FASE 1)
-    GET    /api/shipments/{id}/         - Detalle embarque
-    PUT    /api/shipments/{id}/         - Actualizar embarque
-    DELETE /api/shipments/{id}/         - Eliminar embarque
-    
-    Acciones adicionales:
-    GET    /api/shipments/{id}/sales-confirmation/  - Ver Sales Confirmation
-    POST   /api/shipments/{id}/send-sc/             - Enviar SC al cliente
+    GET    /api/shipments/                     - Lista embarques
+    POST   /api/shipments/                     - Crear embarque
+    GET    /api/shipments/{id}/                - Detalle embarque
+    GET    /api/shipments/{id}/sales-confirmation/  - Datos para SC
+    POST   /api/shipments/{id}/send-sc/        - Enviar SC al cliente
+    POST   /api/shipments/{id}/add-item/       - Agregar ítem
+    PUT    /api/shipments/{id}/update-item/{item_id}/  - Actualizar ítem
+    DELETE /api/shipments/{id}/delete-item/{item_id}/  - Eliminar ítem
     """
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        """Filtrar por organización del usuario"""
+        """
+        Filtrar embarques según organización:
+        - Si es owner_org: ve todos sus embarques
+        - Si es participant: ve embarques donde participa
+        - Platform admin: ve todo
+        """
+        user = self.request.user
+        
+        if getattr(user, 'is_platform_admin', False):
+            return Shipment.objects.all()
+        
+        org = user.organization
+        if not org:
+            return Shipment.objects.none()
+        
+        # Embarques propios + donde participa
+        from django.db.models import Q
         return Shipment.objects.filter(
-            organization=self.request.user.organization
-        ).select_related('client', 'created_by').order_by('-created_at')
+            Q(owner_org=org) | 
+            Q(participants__organization=org)
+        ).distinct().select_related('owner_org', 'created_by').order_by('-created_at')
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -226,48 +207,57 @@ class ShipmentViewSet(viewsets.ModelViewSet):
             return ShipmentDetailSerializer
         return ShipmentListSerializer
     
+    def create(self, request, *args, **kwargs):
+        serializer = ShipmentCreateSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        if serializer.is_valid():
+            shipment = serializer.save()
+            return Response(
+                ShipmentDetailSerializer(shipment).data,
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
     @action(detail=True, methods=['get'], url_path='sales-confirmation')
     def sales_confirmation(self, request, pk=None):
-        """
-        Obtener datos del Sales Confirmation para generar PDF
-        
-        GET /api/shipments/{id}/sales-confirmation/
-        """
+        """Obtener datos del Sales Confirmation para PDF"""
         shipment = self.get_object()
         serializer = SalesConfirmationSerializer(shipment)
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'], url_path='send-sc')
     def send_sales_confirmation(self, request, pk=None):
-        """
-        Enviar Sales Confirmation al cliente por email
-        
-        POST /api/shipments/{id}/send-sc/
-        
-        - Genera un magic link único
-        - Guarda el token en BD con expiración
-        - Envía email al cliente
-        """
+        """Enviar Sales Confirmation al cliente por email"""
         shipment = self.get_object()
         
-        if shipment.status != 'DRAFT':
+        if shipment.status not in ['DRAFT', 'SC_SENT']:
             return Response(
                 {'error': 'Solo se puede enviar SC en estado DRAFT'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Verificar que el cliente tiene email
-        client_email = shipment.client.contact_email
+        # Obtener email del buyer
+        buyer = shipment.participants.filter(role_type='BUYER').first()
+        if not buyer:
+            return Response(
+                {'error': 'No hay comprador asignado'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        client_email = buyer.organization.contact_email
         if not client_email:
             return Response(
                 {'error': 'El cliente no tiene email configurado'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Generar magic link token
-        magic_token = secrets.token_urlsafe(32)
+        # Invalidar magic links anteriores
+        MagicLink.objects.filter(shipment=shipment, is_active=True).update(is_active=False)
         
-        # Crear MagicLink en BD con expiración de 7 días
+        # Generar nuevo magic link
+        magic_token = secrets.token_urlsafe(32)
         magic_link = MagicLink.objects.create(
             shipment=shipment,
             token=magic_token,
@@ -275,17 +265,17 @@ class ShipmentViewSet(viewsets.ModelViewSet):
             expires_at=timezone.now() + timedelta(days=7)
         )
         
-        # Construir la URL del magic link
         frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
         magic_url = f"{frontend_url}/sign/{shipment.id}/{magic_token}"
         
-        # Enviar email al cliente EN BACKGROUND (no bloquea el request)
+        # Email HTML
+        seller = shipment.participants.filter(role_type='SELLER').first()
+        seller_name = seller.organization.name if seller else 'Exportador'
+        
         html_message = f'''
         <!DOCTYPE html>
         <html>
-        <head>
-            <meta charset="utf-8">
-        </head>
+        <head><meta charset="utf-8"></head>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
             <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
                 <div style="background: linear-gradient(135deg, #2563eb, #1d4ed8); padding: 30px; border-radius: 12px 12px 0 0;">
@@ -295,31 +285,26 @@ class ShipmentViewSet(viewsets.ModelViewSet):
                 <div style="background: #f8fafc; padding: 30px; border: 1px solid #e2e8f0; border-top: none;">
                     <p>Estimado cliente,</p>
                     <p>Le enviamos la Sales Confirmation para su revisión y aprobación.</p>
-                    <p><strong>Vendedor:</strong> {shipment.organization.name}</p>
+                    <p><strong>Vendedor:</strong> {seller_name}</p>
                     <p><strong>Incoterm:</strong> {shipment.incoterm} {shipment.destination_port}</p>
                     <div style="text-align: center; margin: 30px 0;">
                         <a href="{magic_url}" style="display: inline-block; background: #2563eb; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: bold;">
                             Revisar y Firmar
                         </a>
                     </div>
-                    <p style="color: #64748b; font-size: 14px;">
-                        Este enlace expira en 7 días. Si tiene preguntas, contacte a su representante.
-                    </p>
-                </div>
-                <div style="text-align: center; padding: 20px; color: #94a3b8; font-size: 12px;">
-                    <p>Exportech - Sistema de Gestión de Exportaciones</p>
+                    <p style="color: #64748b; font-size: 14px;">Este enlace expira en 7 días.</p>
                 </div>
             </div>
         </body>
         </html>
         '''
         
-        # Función para enviar email en background
+        # Enviar email en background
         def send_email_async():
             try:
                 send_mail(
                     subject=f'Action Required: Sign Sales Confirmation #{shipment.internal_ref}',
-                    message=f'Please review and sign the Sales Confirmation at: {magic_url}',
+                    message=f'Please review and sign: {magic_url}',
                     from_email=settings.DEFAULT_FROM_EMAIL,
                     recipient_list=[client_email],
                     html_message=html_message,
@@ -329,51 +314,92 @@ class ShipmentViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 print(f"❌ Error enviando email: {e}")
         
-        # Iniciar envío en thread separado
         email_thread = threading.Thread(target=send_email_async)
         email_thread.start()
+        
+        # Actualizar estado
+        shipment.status = 'SC_SENT'
+        shipment.save()
         
         return Response({
             'message': f'Sales Confirmation enviándose a {client_email}',
             'magic_link': magic_url,
-            'shipment_ref': shipment.internal_ref,
             'expires_at': magic_link.expires_at.isoformat()
         })
     
     @action(detail=True, methods=['post'], url_path='add-item')
     def add_sales_item(self, request, pk=None):
-        """
-        Agregar ítem al embarque
-        
-        POST /api/shipments/{id}/add-item/
-        Body: { "sku": "SKU-102", "description": "...", "price": 12.00, "quantity": 100 }
-        """
+        """Agregar ítem al embarque"""
         shipment = self.get_object()
         
-        if shipment.status != 'DRAFT':
+        if shipment.status not in ['DRAFT', 'SC_SENT']:
             return Response(
-                {'error': 'No se puede modificar un embarque firmado'},
+                {'error': 'No se puede modificar este embarque'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        serializer = SalesItemCreateSerializer(data=request.data)
+        serializer = SalesItemSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(shipment=shipment)
-            return Response(SalesItemSerializer(serializer.instance).data, status=status.HTTP_201_CREATED)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['put'], url_path='update-item/(?P<item_id>[^/.]+)')
+    def update_sales_item(self, request, pk=None, item_id=None):
+        """Actualizar ítem del embarque"""
+        shipment = self.get_object()
+        
+        if shipment.status not in ['DRAFT', 'SC_SENT']:
+            return Response(
+                {'error': 'No se puede modificar este embarque'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            item = SalesItem.objects.get(id=item_id, shipment=shipment)
+        except SalesItem.DoesNotExist:
+            return Response({'error': 'Ítem no encontrado'}, status=404)
+        
+        if 'price' in request.data:
+            item.price = request.data['price']
+        if 'quantity' in request.data:
+            item.quantity = request.data['quantity']
+        if 'description' in request.data:
+            item.description = request.data['description']
+        
+        item.save()
+        return Response(SalesItemSerializer(item).data)
+    
+    @action(detail=True, methods=['delete'], url_path='delete-item/(?P<item_id>[^/.]+)')
+    def delete_sales_item(self, request, pk=None, item_id=None):
+        """Eliminar ítem del embarque"""
+        shipment = self.get_object()
+        
+        if shipment.status not in ['DRAFT', 'SC_SENT']:
+            return Response(
+                {'error': 'No se puede modificar este embarque'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            item = SalesItem.objects.get(id=item_id, shipment=shipment)
+            item.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except SalesItem.DoesNotExist:
+            return Response({'error': 'Ítem no encontrado'}, status=404)
 
+
+# ============================================
+# MAGIC LINK / FIRMA PÚBLICA
+# ============================================
 
 @api_view(['GET'])
-@permission_classes([AllowAny])  # Sin autenticación - acceso via magic link
+@permission_classes([AllowAny])
 def view_sales_confirmation(request, shipment_id, token):
     """
-    Vista pública para que el cliente vea la Sales Confirmation
-    
+    Vista pública del Sales Confirmation via magic link
     GET /api/sign/{shipment_id}/{token}/
-    
-    El cliente accede sin login via magic link
     """
-    # Validar el magic link
     magic_link = get_object_or_404(MagicLink, shipment_id=shipment_id, token=token)
     
     if not magic_link.is_valid():
@@ -387,25 +413,18 @@ def view_sales_confirmation(request, shipment_id, token):
     
     return Response({
         'shipment': serializer.data,
-        'can_sign': shipment.status == 'DRAFT',
+        'can_sign': shipment.status in ['DRAFT', 'SC_SENT'],
         'expires_at': magic_link.expires_at.isoformat()
     })
 
 
 @api_view(['POST'])
-@permission_classes([AllowAny])  # Sin autenticación - acceso via magic link
+@permission_classes([AllowAny])
 def sign_sales_confirmation(request, shipment_id, token):
     """
     Firmar o rechazar Sales Confirmation
-    
     POST /api/sign/{shipment_id}/{token}/submit/
-    Body: 
-    - Aprobar: { "action": "approve", "signature_name": "John Doe" }
-    - Rechazar: { "action": "reject", "rejection_comment": "Precio incorrecto" }
-    
-    Captura IP y timestamp como prueba de conformidad
     """
-    # Validar el magic link
     magic_link = get_object_or_404(MagicLink, shipment_id=shipment_id, token=token)
     
     if not magic_link.is_valid():
@@ -416,7 +435,7 @@ def sign_sales_confirmation(request, shipment_id, token):
     
     shipment = magic_link.shipment
     
-    if shipment.status != 'DRAFT':
+    if shipment.status not in ['DRAFT', 'SC_SENT']:
         return Response(
             {'error': 'Este documento ya fue procesado'},
             status=status.HTTP_400_BAD_REQUEST
@@ -436,8 +455,7 @@ def sign_sales_confirmation(request, shipment_id, token):
     magic_link.save()
     
     if data['action'] == 'approve':
-        # Crear registro de firma
-        signature_log = SignatureLog.objects.create(
+        SignatureLog.objects.create(
             shipment=shipment,
             magic_link=magic_link,
             status='APPROVED',
@@ -446,21 +464,17 @@ def sign_sales_confirmation(request, shipment_id, token):
             user_agent=user_agent
         )
         
-        # Actualizar estado del embarque
         shipment.status = 'SIGNED'
         shipment.save()
         
         return Response({
             'message': 'Sales Confirmation firmado exitosamente',
-            'status': 'SC_SIGNED',
+            'status': 'SIGNED',
             'signed_by': data['signature_name'],
-            'signed_at': signature_log.signed_at.isoformat(),
-            'ip_address': client_ip
         })
     
     else:  # reject
-        # Crear registro de rechazo
-        signature_log = SignatureLog.objects.create(
+        SignatureLog.objects.create(
             shipment=shipment,
             magic_link=magic_link,
             status='REJECTED',
@@ -469,162 +483,101 @@ def sign_sales_confirmation(request, shipment_id, token):
             user_agent=user_agent
         )
         
-        # TODO: Notificar al exportador por email
+        # Volver a DRAFT para permitir correcciones
+        shipment.status = 'DRAFT'
+        shipment.save()
         
         return Response({
             'message': 'Sales Confirmation rechazado',
-            'status': 'SC_REJECTED',
+            'status': 'REJECTED',
             'rejection_comment': data['rejection_comment'],
-            'rejected_at': signature_log.signed_at.isoformat(),
-            'ip_address': client_ip
         })
 
 
 # ============================================
-# PLATFORM ADMIN VIEWS (Dueños de la plataforma)
+# MATERIALS
 # ============================================
 
-from .models import PlatformAdmin, Organization
-from .serializers import (
-    PlatformAdminLoginSerializer,
-    OrganizationPlatformSerializer, 
-    AppUserPlatformSerializer
-)
-from .authentication import PlatformAdminAuthentication, IsPlatformAdmin, platform_admin_required
-import jwt
-from django.conf import settings as django_settings
-from datetime import datetime, timedelta
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def materials_list(request):
+    """
+    Obtener catálogo de materiales
+    GET /api/materials/
+    """
+    serializer = MaterialMasterSerializer(MATERIAL_MASTER, many=True)
+    return Response(serializer.data)
 
 
-def generate_platform_token(admin):
-    """Genera un JWT para Platform Admin"""
-    payload = {
-        'platform_admin_id': admin.id,
-        'email': admin.email,
-        'type': 'platform_admin',
-        'exp': datetime.utcnow() + timedelta(hours=24),
-        'iat': datetime.utcnow()
-    }
-    return jwt.encode(payload, django_settings.SECRET_KEY, algorithm='HS256')
-
-
-def verify_platform_token(token):
-    """Verifica y decodifica un token de Platform Admin"""
-    try:
-        payload = jwt.decode(token, django_settings.SECRET_KEY, algorithms=['HS256'])
-        print(f"✅ Token decoded: {payload}")
-        if payload.get('type') != 'platform_admin':
-            print(f"❌ Invalid token type: {payload.get('type')}")
-            return None
-        admin = PlatformAdmin.objects.filter(id=payload['platform_admin_id'], is_active=True).first()
-        print(f"👤 Admin lookup result: {admin}")
-        return admin
-    except jwt.ExpiredSignatureError as e:
-        print(f"❌ Token expired: {e}")
-        return None
-    except jwt.InvalidTokenError as e:
-        print(f"❌ Invalid token: {e}")
-        return None
-
-
-def get_platform_admin_from_request(request):
-    """Extrae el Platform Admin del header Authorization"""
-    auth_header = request.headers.get('Authorization', '')
-    print(f"🔍 Auth header: {auth_header[:50] if auth_header else 'MISSING'}...")
-    if not auth_header.startswith('Bearer '):
-        print("❌ No Bearer token found")
-        return None
-    token = auth_header.split(' ')[1]
-    print(f"🔑 Token extracted: {token[:30]}...")
-    admin = verify_platform_token(token)
-    print(f"👤 Admin found: {admin.email if admin else 'NONE'}")
-    return admin
-
+# ============================================
+# PLATFORM ADMIN VIEWS
+# ============================================
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def platform_login(request):
     """
-    Login para Platform Admins (dueños de la plataforma)
-    
+    Login de Platform Admin
     POST /api/platform/login/
-    Body: { "email": "admin@exportech.cl", "password": "secret" }
     """
-    serializer = PlatformAdminLoginSerializer(data=request.data)
+    serializer = PlatformLoginSerializer(data=request.data)
     if not serializer.is_valid():
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=400)
     
     email = serializer.validated_data['email']
     password = serializer.validated_data['password']
     
     try:
-        admin = PlatformAdmin.objects.get(email=email)
-    except PlatformAdmin.DoesNotExist:
-        return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
-    
-    if not admin.check_password(password):
-        return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
-    
-    if not admin.is_active:
-        return Response({'error': 'Cuenta desactivada'}, status=status.HTTP_401_UNAUTHORIZED)
-    
-    # Actualizar last_login
-    admin.last_login = timezone.now()
-    admin.save(update_fields=['last_login'])
-    
-    # Generar token
-    token = generate_platform_token(admin)
-    
-    return Response({
-        'token': token,
-        'admin': {
-            'id': admin.id,
-            'email': admin.email,
-            'name': admin.name,
-        }
-    })
+        user = User.objects.get(email=email, is_platform_admin=True, is_active=True)
+        
+        if not user.check_password(password):
+            return Response({'error': 'Credenciales inválidas'}, status=401)
+        
+        # Actualizar last_login
+        user.last_login = timezone.now()
+        user.save(update_fields=['last_login'])
+        
+        # Generar JWT
+        token = jwt.encode({
+            'user_id': str(user.id),
+            'email': user.email,
+            'type': 'platform_admin',
+            'exp': datetime.utcnow() + timedelta(hours=8)
+        }, settings.SECRET_KEY, algorithm='HS256')
+        
+        return Response({
+            'token': token,
+            'user': {
+                'id': str(user.id),
+                'email': user.email,
+                'name': user.name,
+            }
+        })
+        
+    except User.DoesNotExist:
+        return Response({'error': 'Credenciales inválidas'}, status=401)
 
 
 @platform_admin_required(['GET'])
-def platform_me(request):
+def platform_dashboard(request):
     """
-    Obtener datos del Platform Admin actual
-    
-    GET /api/platform/me/
-    """
-    admin = request.user
-    
-    return Response({
-        'id': admin.id,
-        'email': admin.email,
-        'name': admin.name,
-    })
-
-
-@platform_admin_required(['GET'])
-def platform_stats(request):
-    """
-    Estadísticas de la plataforma para Platform Admin
-    
-    GET /api/platform/stats/
+    Dashboard de Platform Admin
+    GET /api/platform/dashboard/
     """
     return Response({
-        'organizations': Organization.objects.count(),
-        'organizations_active': Organization.objects.filter(is_active=True).count(),
-        'users': AppUser.objects.count(),
-        'users_active': AppUser.objects.filter(is_active=True).count(),
-        'shipments': Shipment.objects.count(),
-        'clients': ClientPartner.objects.count(),
+        'organizations_count': Organization.objects.count(),
+        'users_count': User.objects.filter(is_platform_admin=False).count(),
+        'shipments_count': Shipment.objects.count(),
+        'exporters_count': Organization.objects.filter(type='EXPORTER').count(),
+        'importers_count': Organization.objects.filter(type='IMPORTER').count(),
     })
 
 
 @platform_admin_required(['GET', 'POST'])
 def platform_organizations(request):
     """
-    Listar o crear organizaciones
-    
-    GET /api/platform/organizations/
-    POST /api/platform/organizations/
+    Gestión de organizaciones
+    GET/POST /api/platform/organizations/
     """
     if request.method == 'GET':
         orgs = Organization.objects.all().order_by('-created_at')
@@ -632,83 +585,93 @@ def platform_organizations(request):
         return Response(serializer.data)
     
     elif request.method == 'POST':
-        serializer = OrganizationPlatformSerializer(data=request.data)
+        serializer = OrganizationSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            org = serializer.save()
+            return Response(OrganizationPlatformSerializer(org).data, status=201)
+        return Response(serializer.errors, status=400)
 
 
 @platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_organization_detail(request, org_id):
     """
-    Detalle, actualizar o eliminar organización
-    
-    GET/PUT/DELETE /api/platform/organizations/{id}/
+    Detalle de organización
+    GET/PUT/DELETE /api/platform/organizations/{org_id}/
     """
     org = get_object_or_404(Organization, id=org_id)
     
     if request.method == 'GET':
-        serializer = OrganizationPlatformSerializer(org)
-        return Response(serializer.data)
+        return Response(OrganizationPlatformSerializer(org).data)
     
     elif request.method == 'PUT':
-        serializer = OrganizationPlatformSerializer(org, data=request.data, partial=True)
+        serializer = OrganizationSerializer(org, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(OrganizationPlatformSerializer(org).data)
+        return Response(serializer.errors, status=400)
     
     elif request.method == 'DELETE':
         org.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(status=204)
 
 
 @platform_admin_required(['GET', 'POST'])
 def platform_users(request):
     """
-    Listar o crear usuarios de organizaciones
-    
-    GET /api/platform/users/?organization=1
-    POST /api/platform/users/
+    Gestión de usuarios
+    GET/POST /api/platform/users/
     """
     if request.method == 'GET':
-        users = AppUser.objects.all().order_by('-created_at')
-        org_id = request.query_params.get('organization')
-        if org_id:
-            users = users.filter(organization_id=org_id)
-        serializer = AppUserPlatformSerializer(users, many=True)
+        users = User.objects.filter(is_platform_admin=False).order_by('-created_at')
+        serializer = UserPlatformSerializer(users, many=True)
         return Response(serializer.data)
     
     elif request.method == 'POST':
-        serializer = AppUserPlatformSerializer(data=request.data)
+        serializer = UserPlatformSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            user = serializer.save()
+            return Response(UserPlatformSerializer(user).data, status=201)
+        return Response(serializer.errors, status=400)
 
 
 @platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_user_detail(request, user_id):
     """
-    Detalle, actualizar o eliminar usuario
-    
-    GET/PUT/DELETE /api/platform/users/{id}/
+    Detalle de usuario
+    GET/PUT/DELETE /api/platform/users/{user_id}/
     """
-    user = get_object_or_404(AppUser, id=user_id)
+    user = get_object_or_404(User, id=user_id)
     
     if request.method == 'GET':
-        serializer = AppUserPlatformSerializer(user)
-        return Response(serializer.data)
+        return Response(UserPlatformSerializer(user).data)
     
     elif request.method == 'PUT':
-        serializer = AppUserPlatformSerializer(user, data=request.data, partial=True)
+        serializer = UserPlatformSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(UserPlatformSerializer(user).data)
+        return Response(serializer.errors, status=400)
     
     elif request.method == 'DELETE':
         user.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(status=204)
+
+
+@platform_admin_required(['GET', 'PUT'])
+def platform_system_config(request):
+    """
+    Configuración del sistema
+    GET/PUT /api/platform/config/
+    """
+    if request.method == 'GET':
+        configs = SystemConfig.objects.all()
+        return Response({c.key: c.value for c in configs})
+    
+    elif request.method == 'PUT':
+        for key, value in request.data.items():
+            SystemConfig.objects.update_or_create(
+                key=key,
+                defaults={'value': value}
+            )
+        return Response({'message': 'Configuración actualizada'})
 

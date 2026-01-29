@@ -1,20 +1,21 @@
 """
-Autenticación y permisos personalizados para Platform Admin
+Autenticación y Permisos - Arquitectura Multi-Tenant
 """
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.permissions import BasePermission
+from rest_framework.exceptions import AuthenticationFailed
 import jwt
 from django.conf import settings
 
 
 class PlatformAdminAuthentication(BaseAuthentication):
     """
-    Autenticación basada en JWT para Platform Admins
+    Autenticación JWT para Platform Admins (is_platform_admin=True)
+    Se usa para el panel de administración de la plataforma
     """
     
     def authenticate(self, request):
-        # Import aquí para evitar importación circular
-        from .models import PlatformAdmin
+        from .models import User
         
         auth_header = request.headers.get('Authorization', '')
         
@@ -26,18 +27,20 @@ class PlatformAdminAuthentication(BaseAuthentication):
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             
+            # Solo autenticar tokens de platform admin
             if payload.get('type') != 'platform_admin':
                 return None
             
-            admin = PlatformAdmin.objects.filter(
-                id=payload['platform_admin_id'],
-                is_active=True
+            user = User.objects.filter(
+                id=payload['user_id'],
+                is_active=True,
+                is_platform_admin=True
             ).first()
             
-            if not admin:
+            if not user:
                 return None
             
-            return (admin, None)
+            return (user, None)
             
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
             return None
@@ -50,22 +53,46 @@ class PlatformAdminAuthentication(BaseAuthentication):
 
 class IsPlatformAdmin(BasePermission):
     """
-    Permiso que verifica si el usuario es un PlatformAdmin
+    Permiso que verifica si el usuario es Platform Admin
     """
     def has_permission(self, request, view):
-        # Import aquí para evitar importación circular
-        from .models import PlatformAdmin
-        return isinstance(request.user, PlatformAdmin)
+        return (
+            request.user and 
+            hasattr(request.user, 'is_platform_admin') and 
+            request.user.is_platform_admin
+        )
+
+
+class IsOrganizationMember(BasePermission):
+    """
+    Permiso base para verificar membresía en organización
+    Platform Admins pueden ver todo
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Platform admins pueden ver todo
+        if getattr(request.user, 'is_platform_admin', False):
+            return True
+        
+        # Usuario normal debe tener organización
+        return request.user.organization is not None
+
+
+def get_user_organization(user):
+    """
+    Helper para obtener la organización del usuario
+    Retorna None si es platform admin sin org específica
+    """
+    if not user or not user.is_authenticated:
+        return None
+    return user.organization
 
 
 def platform_admin_required(methods=['GET']):
     """
-    Decorador que combina api_view + autenticación + permisos de Platform Admin
-    
-    Uso:
-        @platform_admin_required(['GET', 'POST'])
-        def my_view(request):
-            ...
+    Decorador para vistas que requieren Platform Admin
     """
     from functools import wraps
     from rest_framework.decorators import api_view, authentication_classes, permission_classes
