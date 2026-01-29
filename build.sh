@@ -2,11 +2,16 @@
 # exit on error
 set -o errexit
 
+echo "📦 Instalando dependencias..."
 pip install -r requirements.txt
 
+echo "📁 Recolectando archivos estáticos..."
 python manage.py collectstatic --no-input
-python manage.py migrate
 
+echo "🗄️ Ejecutando migraciones de base de datos..."
+python manage.py migrate --noinput
+
+echo "👤 Verificando Platform Admin..."
 # Crear Platform Admin si no existe (usando variables de entorno)
 python manage.py shell << EOF
 import os
@@ -27,3 +32,5 @@ if email and password:
 else:
     print("⚠️ Variables PLATFORM_ADMIN_EMAIL y PLATFORM_ADMIN_PASSWORD no configuradas")
 EOF
+
+echo "✅ Build completado exitosamente!"

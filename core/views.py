@@ -1,5 +1,5 @@
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.decorators import api_view, permission_classes, action, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -479,6 +479,7 @@ from .serializers import (
     OrganizationPlatformSerializer, 
     AppUserPlatformSerializer
 )
+from .authentication import PlatformAdminAuthentication, IsPlatformAdmin, platform_admin_required
 import jwt
 from django.conf import settings as django_settings
 from datetime import datetime, timedelta
@@ -500,20 +501,33 @@ def verify_platform_token(token):
     """Verifica y decodifica un token de Platform Admin"""
     try:
         payload = jwt.decode(token, django_settings.SECRET_KEY, algorithms=['HS256'])
+        print(f"✅ Token decoded: {payload}")
         if payload.get('type') != 'platform_admin':
+            print(f"❌ Invalid token type: {payload.get('type')}")
             return None
-        return PlatformAdmin.objects.filter(id=payload['platform_admin_id'], is_active=True).first()
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        admin = PlatformAdmin.objects.filter(id=payload['platform_admin_id'], is_active=True).first()
+        print(f"👤 Admin lookup result: {admin}")
+        return admin
+    except jwt.ExpiredSignatureError as e:
+        print(f"❌ Token expired: {e}")
+        return None
+    except jwt.InvalidTokenError as e:
+        print(f"❌ Invalid token: {e}")
         return None
 
 
 def get_platform_admin_from_request(request):
     """Extrae el Platform Admin del header Authorization"""
     auth_header = request.headers.get('Authorization', '')
+    print(f"🔍 Auth header: {auth_header[:50] if auth_header else 'MISSING'}...")
     if not auth_header.startswith('Bearer '):
+        print("❌ No Bearer token found")
         return None
     token = auth_header.split(' ')[1]
-    return verify_platform_token(token)
+    print(f"🔑 Token extracted: {token[:30]}...")
+    admin = verify_platform_token(token)
+    print(f"👤 Admin found: {admin.email if admin else 'NONE'}")
+    return admin
 
 
 @api_view(['POST'])
@@ -560,17 +574,14 @@ def platform_login(request):
     })
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET'])
 def platform_me(request):
     """
     Obtener datos del Platform Admin actual
     
     GET /api/platform/me/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
+    admin = request.user
     
     return Response({
         'id': admin.id,
@@ -579,18 +590,13 @@ def platform_me(request):
     })
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET'])
 def platform_stats(request):
     """
     Estadísticas de la plataforma para Platform Admin
     
     GET /api/platform/stats/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
-    
     return Response({
         'organizations': Organization.objects.count(),
         'organizations_active': Organization.objects.filter(is_active=True).count(),
@@ -601,8 +607,7 @@ def platform_stats(request):
     })
 
 
-@api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET', 'POST'])
 def platform_organizations(request):
     """
     Listar o crear organizaciones
@@ -610,10 +615,6 @@ def platform_organizations(request):
     GET /api/platform/organizations/
     POST /api/platform/organizations/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
-    
     if request.method == 'GET':
         orgs = Organization.objects.all().order_by('-created_at')
         serializer = OrganizationPlatformSerializer(orgs, many=True)
@@ -627,18 +628,13 @@ def platform_organizations(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_organization_detail(request, org_id):
     """
     Detalle, actualizar o eliminar organización
     
     GET/PUT/DELETE /api/platform/organizations/{id}/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
-    
     org = get_object_or_404(Organization, id=org_id)
     
     if request.method == 'GET':
@@ -657,8 +653,7 @@ def platform_organization_detail(request, org_id):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-@api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET', 'POST'])
 def platform_users(request):
     """
     Listar o crear usuarios de organizaciones
@@ -666,10 +661,6 @@ def platform_users(request):
     GET /api/platform/users/?organization=1
     POST /api/platform/users/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
-    
     if request.method == 'GET':
         users = AppUser.objects.all().order_by('-created_at')
         org_id = request.query_params.get('organization')
@@ -686,18 +677,13 @@ def platform_users(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
-@permission_classes([AllowAny])
+@platform_admin_required(['GET', 'PUT', 'DELETE'])
 def platform_user_detail(request, user_id):
     """
     Detalle, actualizar o eliminar usuario
     
     GET/PUT/DELETE /api/platform/users/{id}/
     """
-    admin = get_platform_admin_from_request(request)
-    if not admin:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_401_UNAUTHORIZED)
-    
     user = get_object_or_404(AppUser, id=user_id)
     
     if request.method == 'GET':
