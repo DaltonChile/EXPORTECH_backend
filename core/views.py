@@ -213,6 +213,91 @@ def generate_claim_token(user, expires_days=7):
 
 
 # ============================================
+# IMPORTER DASHBOARD
+# ============================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def importer_dashboard(request):
+    """
+    Dashboard para usuarios importadores
+    GET /api/importer/dashboard/
+    
+    Retorna:
+    - Acciones pendientes (SC por firmar)
+    - Embarques activos
+    - Historial reciente
+    """
+    user = request.user
+    org = user.organization
+    
+    if not org:
+        return Response({'error': 'Usuario sin organización'}, status=400)
+    
+    # Verificar que sea importador
+    if org.type != 'IMPORTER':
+        return Response({'error': 'Este dashboard es solo para importadores'}, status=403)
+    
+    # Obtener embarques donde soy el importador
+    my_shipments = Shipment.objects.filter(
+        participants__organization=org,
+        participants__role_type='IMPORTER'
+    ).select_related('owner_org').order_by('-created_at')
+    
+    # Acciones pendientes: SC enviadas pero no firmadas
+    pending_signatures = my_shipments.filter(status='SC_SENT')
+    
+    # Embarques activos (después de firmar, en proceso)
+    active_shipments = my_shipments.filter(
+        status__in=['SC_SIGNED', 'IN_PRODUCTION', 'SHIPPED']
+    )
+    
+    # Historial (completados)
+    completed_shipments = my_shipments.filter(status='DELIVERED')[:5]
+    
+    # Formatear respuesta
+    def format_shipment(s, include_magic_link=False):
+        data = {
+            'id': s.id,
+            'internal_ref': s.internal_ref,
+            'exporter': s.owner_org.name if s.owner_org else 'N/A',
+            'status': s.status,
+            'status_display': dict(Shipment.STATUS_CHOICES).get(s.status, s.status),
+            'created_at': s.created_at.isoformat(),
+            'incoterm': s.incoterm,
+            'destination_port': s.destination_port,
+        }
+        
+        # Para SC pendientes, incluir el magic link si existe
+        if include_magic_link:
+            magic_link = MagicLink.objects.filter(
+                shipment=s,
+                link_type='SIGN_SC',
+                is_used=False
+            ).first()
+            if magic_link:
+                data['sign_url'] = f"/sign/{s.id}/{magic_link.token}/"
+        
+        return data
+    
+    return Response({
+        'organization': {
+            'id': str(org.id),
+            'name': org.name,
+            'status': org.status,
+        },
+        'pending_actions': [format_shipment(s, include_magic_link=True) for s in pending_signatures],
+        'active_shipments': [format_shipment(s) for s in active_shipments],
+        'completed_shipments': [format_shipment(s) for s in completed_shipments],
+        'summary': {
+            'pending_signatures': pending_signatures.count(),
+            'active_count': active_shipments.count(),
+            'total_shipments': my_shipments.count(),
+        }
+    })
+
+
+# ============================================
 # CLIENTS (BUSINESS RELATIONS / AGENDA)
 # ============================================
 

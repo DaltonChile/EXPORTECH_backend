@@ -25,6 +25,7 @@ urlpatterns = [
     # RESOURCES
     # ============================================
     path('materials/', views.materials_list, name='materials'),
+    path('importer/dashboard/', views.importer_dashboard, name='importer-dashboard'),
     
     # ============================================
     # MAGIC LINK / FIRMA PÚBLICA

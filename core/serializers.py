@@ -136,12 +136,13 @@ class CreatePartnerOrganizationSerializer(serializers.Serializer):
 class UserSerializer(serializers.ModelSerializer):
     """Serializer de User"""
     organization_name = serializers.CharField(source='organization.name', read_only=True)
+    organization_type = serializers.CharField(source='organization.type', read_only=True)
     
     class Meta:
         model = User
         fields = [
             'id', 'email', 'name', 'organization', 'organization_name',
-            'role', 'is_platform_admin', 'is_active', 'created_at'
+            'organization_type', 'role', 'is_platform_admin', 'is_active', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'is_platform_admin']
 
