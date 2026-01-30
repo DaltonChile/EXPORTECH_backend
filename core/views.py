@@ -825,17 +825,60 @@ def platform_login(request):
 
 
 @platform_admin_required(['GET'])
-def platform_dashboard(request):
+def platform_stats(request):
     """
-    Dashboard de Platform Admin
-    GET /api/platform/dashboard/
+    Estadísticas completas de la plataforma
+    GET /api/platform/stats/
     """
+    from django.db.models import Count, Q
+    from django.utils import timezone
+    from datetime import timedelta
+    
+    now = timezone.now()
+    last_30_days = now - timedelta(days=30)
+    last_7_days = now - timedelta(days=7)
+    
+    # Conteos básicos
+    total_orgs = Organization.objects.count()
+    exporters = Organization.objects.filter(type='EXPORTER')
+    importers = Organization.objects.filter(type='IMPORTER')
+    
+    total_users = User.objects.filter(is_platform_admin=False).count()
+    active_users = User.objects.filter(is_platform_admin=False, is_active=True, invite_pending=False).count()
+    pending_users = User.objects.filter(invite_pending=True).count()
+    
+    total_shipments = Shipment.objects.count()
+    recent_shipments = Shipment.objects.filter(created_at__gte=last_30_days).count()
+    
+    # Embarques por estado
+    shipments_by_status = dict(Shipment.objects.values('status').annotate(count=Count('id')).values_list('status', 'count'))
+    
+    # Organizaciones recientes
+    recent_orgs = Organization.objects.filter(
+        created_at__gte=last_7_days
+    ).order_by('-created_at').values('id', 'name', 'type', 'status', 'created_at')[:5]
+    
+    # Embarques recientes
+    recent_shipment_list = Shipment.objects.select_related().order_by('-created_at')[:5].values(
+        'id', 'internal_ref', 'status', 'created_at'
+    )
+    
     return Response({
-        'organizations_count': Organization.objects.count(),
-        'users_count': User.objects.filter(is_platform_admin=False).count(),
-        'shipments_count': Shipment.objects.count(),
-        'exporters_count': Organization.objects.filter(type='EXPORTER').count(),
-        'importers_count': Organization.objects.filter(type='IMPORTER').count(),
+        'summary': {
+            'total_organizations': total_orgs,
+            'exporters': exporters.count(),
+            'exporters_active': exporters.filter(status='ACTIVE').count(),
+            'importers': importers.count(),
+            'importers_unclaimed': importers.filter(status='UNCLAIMED').count(),
+            'total_users': total_users,
+            'active_users': active_users,
+            'pending_users': pending_users,
+            'total_shipments': total_shipments,
+            'shipments_last_30_days': recent_shipments,
+        },
+        'shipments_by_status': shipments_by_status,
+        'recent_organizations': list(recent_orgs),
+        'recent_shipments': list(recent_shipment_list),
     })
 
 

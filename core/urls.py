@@ -36,7 +36,7 @@ urlpatterns = [
     # PLATFORM ADMIN
     # ============================================
     path('platform/login/', views.platform_login, name='platform-login'),
-    path('platform/dashboard/', views.platform_dashboard, name='platform-dashboard'),
+    path('platform/stats/', views.platform_stats, name='platform-stats'),
     path('platform/organizations/', views.platform_organizations, name='platform-organizations'),
     path('platform/organizations/<uuid:org_id>/', views.platform_organization_detail, name='platform-organization-detail'),
     path('platform/users/', views.platform_users, name='platform-users'),

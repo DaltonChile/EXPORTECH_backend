@@ -11,11 +11,13 @@ from django.conf import settings
 class PlatformAdminAuthentication(BaseAuthentication):
     """
     Autenticación JWT para Platform Admins (is_platform_admin=True)
-    Se usa para el panel de administración de la plataforma
+    Acepta tanto tokens propios como tokens de SimpleJWT
     """
     
     def authenticate(self, request):
         from .models import User
+        from rest_framework_simplejwt.tokens import AccessToken
+        from rest_framework_simplejwt.exceptions import TokenError
         
         auth_header = request.headers.get('Authorization', '')
         
@@ -24,10 +26,27 @@ class PlatformAdminAuthentication(BaseAuthentication):
         
         token = auth_header.split(' ')[1]
         
+        # Primero intentar con SimpleJWT (sistema unificado)
+        try:
+            access_token = AccessToken(token)
+            user_id = access_token['user_id']
+            
+            user = User.objects.filter(
+                id=user_id,
+                is_active=True,
+                is_platform_admin=True
+            ).first()
+            
+            if user:
+                return (user, None)
+                
+        except TokenError:
+            pass
+        
+        # Fallback: JWT propio (legacy)
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             
-            # Solo autenticar tokens de platform admin
             if payload.get('type') != 'platform_admin':
                 return None
             
@@ -37,15 +56,15 @@ class PlatformAdminAuthentication(BaseAuthentication):
                 is_platform_admin=True
             ).first()
             
-            if not user:
-                return None
-            
-            return (user, None)
+            if user:
+                return (user, None)
             
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-            return None
+            pass
         except Exception:
-            return None
+            pass
+        
+        return None
     
     def authenticate_header(self, request):
         return 'Bearer realm="api"'
